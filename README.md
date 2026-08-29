@@ -7,32 +7,40 @@ Sistema de gestión de inventario que combina una **API REST** (FastAPI) con un 
 ## 📦 Arquitectura
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Usuario (CLI)                         │
-└──────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                    Usuario (CLI)                               │
+└──────────────────────┬────────────────────────────────────────┘
                        │  Lenguaje natural
                        ▼
-┌─────────────────────────────────────────────────────────┐
-│                   agent.py (Agente LLM)                  │
-│                                                         │
-│  ┌──────────┐    ┌──────────────┐    ┌───────────────┐  │
-│  │ Memoria  │    │  Tools (4)   │    │ Conversation  │  │
-│  │ (array)  │◄──►│              │◄──►│    Log CSV    │  │
-│  └──────────┘    └──────┬───────┘    └───────────────┘  │
-└─────────────────────────┼───────────────────────────────┘
-                          │  HTTP (httpx)
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│              api/app.py (FastAPI — REST)                 │
-│                                                         │
-│  GET /inventory    POST /inventory                      │
-│  PATCH /inventory/{id}   GET /inventory/alerts          │
-└──────────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                   agent.py (Agente LLM)                        │
+│                                                                 │
+│  ┌──────────────┐    ┌──────────────────┐    ┌─────────────┐   │
+│  │              │    │  Bucle iterativo │    │             │   │
+│  │   Memoria    │◄──►│  (máx. 5 rondas) │◄──►│ Conversation│   │
+│  │   (array)    │    │                  │    │   Log CSV   │   │
+│  └──────────────┘    └──────┬──────┬────┘    └─────────────┘   │
+│                             │      │                            │
+│                       ┌─────┘      └─────┐                     │
+│                       ▼                  ▼                     │
+│                 ┌────────────┐   ┌──────────────┐              │
+│                 │  Tools (4) │   │  Respuesta   │              │
+│                 │  Ejecutar  │   │    final     │              │
+│                 └──────┬─────┘   └──────────────┘              │
+└────────────────────────┼───────────────────────────────────────┘
+                         │  HTTP (httpx)
+                         ▼
+┌───────────────────────────────────────────────────────────────┐
+│              api/app.py (FastAPI — REST)                       │
+│                                                               │
+│  GET /inventory    POST /inventory                            │
+│  PATCH /inventory/{id}   GET /inventory/alerts                │
+└──────────────────────┬────────────────────────────────────────┘
                        │
                        ▼
-┌─────────────────────────────────────────────────────────┐
-│                  products.csv (Datos)                    │
-└─────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│                  products.csv (Datos)                          │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -56,6 +64,14 @@ Sistema de gestión de inventario que combina una **API REST** (FastAPI) con un 
 ### 🧠 Memoria
 - Mantiene el **historial completo de la conversación** en un array (`MEMORY`)
 - El LLM tiene contexto de toda la interacción, permitiendo referencias a productos o acciones anteriores
+
+### 🔄 Bucle iterativo de tools (máx. 5 rondas)
+- El agente puede ejecutar **múltiples tools en secuencia** para una misma instrucción
+- Por ejemplo, si el usuario pide *"quita 5 de café y muestra el inventario"*, el agente:
+  1. **1ª ronda:** Ejecuta `update_stock(1, -5)` → ve el resultado
+  2. **2ª ronda:** Ejecuta `get_inventory()` → obtiene la lista actualizada
+  3. **3ª ronda:** Genera la respuesta final en lenguaje natural
+- Si el LLM supera las **5 rondas sin dar una respuesta definitiva**, el agente informa al usuario y sugiere simplificar la solicitud
 
 ### 📝 Log de conversación
 - Cada acción se registra automáticamente en **`conversation-log.csv`**
@@ -144,6 +160,24 @@ Escribe 'help' para ver los comandos disponibles.
   • ID 8: Agitadores — 4 unidades
 ```
 
+Ejemplo de **múltiples tools en una sola instrucción**:
+
+```
+👤 Tú: quita 5 kg de café y luego muéstrame el inventario actualizado
+🧠 Pensando...
+🔧 Ejecutando: update_stock({'product_id': 1, 'delta': -5})
+   Resultado: ✅ Stock actualizado: 5 kg retirada de 'Café en granos'. Nuevo stock: 20 kg
+🧠 Analizando resultados...
+🔧 Ejecutando: get_inventory({})
+   Resultado: 📦 **Inventario actual:** ...
+🧠 Analizando resultados...
+🤖 Asistente:
+✅ Listo. Se retiraron 5 kg de Café en granos. El inventario quedó así:
+  • Café en granos — 20 kg
+  • Leche entera — 20 l
+  ... (resto del inventario)
+```
+
 ### 📋 Ejemplos de consultas
 
 | Lo que dices | Lo que hace el agente |
@@ -196,7 +230,8 @@ timestamp,role,message,tool_used,tool_result
 |---|---|---|
 | `Connection refused` al iniciar el agente | La API no está corriendo | Ejecuta `uvicorn app:app --reload` en `api/` |
 | `LLM_API_KEY no encontrada` | Falta el `.env` | Verifica que `.env` exista y tenga la variable |
-| `Error 400: invalid_request_error` | Error de formato en tools | Revisa la memoria del agente o reinicia la sesión |
+| `Error 400: invalid_request_error` | (Antiguo bug resuelto) Error de formato en tools o herramienta no encontrada | Revisa el mensaje específico del error o reinicia la sesión del agente |
+| `Error: Tool choice is none...` | (Antiguo bug resuelto) Ocurría en la 2ª llamada sin tools | Ya no debería ocurrir tras la actualización del bucle iterativo |
 | `ModuleNotFoundError` | Dependencias no instaladas | `pip install -r requirements.txt` |
 
 ---
