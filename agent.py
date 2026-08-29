@@ -348,29 +348,38 @@ def chat_loop():
         _log_entry(role="user", message=user_input)
         MEMORY.append({"role": "user", "content": user_input})
 
-        # Llamar al LLM
+        # Llamar al LLM (con bucle iterativo de hasta 5 rondas)
         print("🧠 Pensando...", end="", flush=True)
 
         try:
+            MAX_TOOL_ITERATIONS = 5
+            iteration = 0
+            final_text = None
             messages = build_messages(user_input)
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.3,
-            )
-            print("\r" + " " * 20 + "\r", end="", flush=True)
 
-            # Obtener el mensaje de respuesta
-            assistant_msg = response.choices[0].message
+            while iteration < MAX_TOOL_ITERATIONS:
+                iteration += 1
 
-            # Verificar si el LLM quiere ejecutar tools
-            if assistant_msg.tool_calls:
-                # Ejecutar las tools solicitadas
+                response = client.chat.completions.create(
+                    model=MODEL,
+                    messages=messages,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    temperature=0.3,
+                )
+                print("\r" + " " * 20 + "\r", end="", flush=True)
+
+                assistant_msg = response.choices[0].message
+
+                # Si el LLM no llama más tools, tenemos la respuesta final
+                if not assistant_msg.tool_calls:
+                    final_text = assistant_msg.content or ""
+                    break
+
+                # Ejecutar todas las tools solicitadas en esta ronda
                 tool_results = process_tool_calls(response, api)
 
-                # Agregar la respuesta del asistente a la memoria
+                # Guardar la respuesta del asistente (con tool_calls) en memoria
                 MEMORY.append({
                     "role": "assistant",
                     "content": assistant_msg.content or "",
@@ -380,7 +389,7 @@ def chat_loop():
                     ],
                 })
 
-                # Agregar resultados de tools a la memoria
+                # Guardar los resultados de las tools en memoria
                 for tr in tool_results:
                     MEMORY.append({
                         "role": "tool",
@@ -388,27 +397,25 @@ def chat_loop():
                         "content": tr["result"],
                     })
 
-                # Hacer una segunda llamada al LLM para que genere respuesta en lenguaje natural
-                second_messages = build_messages(user_input)
-                # Reemplazar el último mensaje (user) con la cadena completa incluyendo tools
-                second_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-                second_messages.extend(MEMORY)
+                # Reconstruir mensajes con la memoria actualizada para la siguiente iteración
+                messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+                messages.extend(MEMORY)
 
-                second_response = client.chat.completions.create(
-                    model=MODEL,
-                    messages=second_messages,
-                    temperature=0.3,
+                # Indicar que el agente sigue procesando (si quedan rondas)
+                if iteration < MAX_TOOL_ITERATIONS:
+                    print("🧠 Analizando resultados...", end="", flush=True)
+
+            # Si se agotaron las iteraciones sin respuesta definitiva
+            if final_text is None:
+                final_text = (
+                    "⚠️ Lo siento, no pude completar mi respuesta después de varios "
+                    "intentos. Por favor, intenta con una instrucción más simple o específica."
                 )
 
-                final_text = second_response.choices[0].message.content or ""
-            else:
-                final_text = assistant_msg.content or ""
-
             # Mostrar respuesta al usuario
-            if final_text:
-                print(f"🤖 Asistente:\n{final_text}\n")
-                MEMORY.append({"role": "assistant", "content": final_text})
-                _log_entry(role="assistant", message=final_text)
+            print(f"🤖 Asistente:\n{final_text}\n")
+            MEMORY.append({"role": "assistant", "content": final_text})
+            _log_entry(role="assistant", message=final_text)
 
         except Exception as e:
             print(f"\n❌ Error al comunicarse con el LLM: {e}")
